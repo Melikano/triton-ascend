@@ -66,7 +66,7 @@ def _apply_ascend_patch():
                 module = _ir.parse_mlir_module(full_name, context)
                 module.context = context
                 return module
-            if ext in ("llir", "ptx", "amdgcn", "ttadapter", "bcmlir"):
+            if ext in ("llir", "ptx", "amdgcn", "ttadapter", "bcmlir", "ptovmi"):
                 return _Path(full_name).read_text()
             if ext in ("cubin", "hsaco", "mlirbc", "npubin"):
                 return _Path(full_name).read_bytes()

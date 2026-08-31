@@ -49,7 +49,10 @@ from triton.backends.ascend.utils import (
     _enable_dump_memory_info,
     _enable_msdebug,
     _get_kernel_target,
+    _get_aicore_linker_path,
     _get_npucompiler_path,
+    _get_objcopy_path,
+    _get_ptoas_path,
     _get_triton_adapter_opt_path,
     _get_triton_mlir_opt_path,
     _get_triton_opt_path,
@@ -497,6 +500,171 @@ def _parse_ttir_metadata(ttir: str, metadata: dict):
     # Parse all tensor kinds from arguments
     metadata["tensor_kinds"] = [int(kind) for _, kind in re.findall(TENSOR_KIND_REGEX, ttir)]
     return metadata
+
+
+def _get_ptoas_arch_for_target(target_arch: str) -> str:
+    if _is_a5_target_arch(target_arch):
+        return "a5"
+    raise NotImplementedError(
+        f'compile_flow="ptoas" is currently supported only for A5 targets; got target {target_arch!r}.')
+
+
+def _set_ptoas_launcher_defaults(metadata: dict):
+    metadata.setdefault("shared", 1)
+    metadata.setdefault("workspace_size", 0)
+    metadata.setdefault("lock_num", 0)
+    metadata.setdefault("lock_init_value", 0)
+    metadata.setdefault("lock_init_val", 0)
+    metadata.setdefault("bs_task_type", 0)
+    metadata.setdefault("required_ub_bits", 0)
+
+
+def _validate_ptoas_launcher_contract(linalg: str, metadata: dict, opt):
+    if opt.is_pure_simt:
+        raise NotImplementedError('compile_flow="ptoas" does not support compile_mode="simt_only" yet.')
+    _get_ptoas_arch_for_target(opt.target_arch)
+
+    mix_mode = metadata.get("mix_mode", "")
+    if not isinstance(mix_mode, str) or not mix_mode.lower().strip("_").startswith("aiv"):
+        raise NotImplementedError(f'compile_flow="ptoas" currently supports only AIV/vector kernels; got {mix_mode!r}.')
+
+    if metadata.get("has_unordered_sync_block_lock", False) or re.search(r'\bsync_block_lock\b', linalg):
+        raise NotImplementedError(
+            'compile_flow="ptoas" cannot launch sync-block-lock kernels until PTOAS exposes resource metadata.')
+
+
+def _build_ptoas_vmi_compile_options(metadata: dict, opt):
+    compile_options = get_common_bishengir_compile_options(metadata)
+    compile_options += ["--emit-ptoas-vmi"]
+
+    multibuffer = metadata.get("multibuffer")
+    num_stages = metadata.get("num_stages")
+    if multibuffer is not None or num_stages is not None:
+        multi_buffer_value = True
+        if multibuffer is not None and not multibuffer:
+            multi_buffer_value = False
+        elif num_stages is not None and num_stages == 1:
+            multi_buffer_value = False
+        compile_options += [f"--enable-auto-multi-buffer={multi_buffer_value}"]
+
+    compile_options += [
+        f"--enable-auto-bind-sub-block={get_auto_bind_sub_block_option(metadata)}",
+    ]
+    if force_disable_ffts(opt.target_arch):
+        compile_options += ["--disable-ffts"]
+
+    auto_multi_buffer = metadata.get("limit_auto_multi_buffer_of_local_buffer")
+    if auto_multi_buffer is None:
+        auto_multi_buffer = "no-limit"
+    compile_options += [f"--limit-auto-multi-buffer-of-local-buffer={auto_multi_buffer}"]
+
+    if _is_auto_map_parallel_blocks_enabled() and not metadata.get("has_auto_blockify_blacklist_op", False):
+        compile_options += ["--enable-auto-blockify-loop"]
+
+    compile_options += [
+        "--enable-hfusion-compile=true",
+        "--enable-hivm-compile=true",
+        "--enable-triton-kernel-compile=true",
+        "--mlir-disable-threading",
+        "--mlir-print-ir-after-failure",
+        "--mlir-print-stacktrace-on-diagnostic",
+    ]
+
+    vf_merge_level = metadata.get("vf_merge_level")
+    if vf_merge_level is not None:
+        compile_options += [f"--enable-vf-merge-level={vf_merge_level}"]
+
+    return compile_options
+
+
+def linalg_to_ptoas_vmi(linalg: str, metadata, opt):
+    linalg, metadata = _parse_linalg_metadata(linalg, metadata)
+    _validate_ptoas_launcher_contract(linalg, metadata, opt)
+    _set_ptoas_launcher_defaults(metadata)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        src_path = os.path.join(tmpdir, "kernel.mlir")
+        dst_path = os.path.join(tmpdir, "kernel.ptovmi.mlir")
+        Path(src_path).write_text(linalg)
+
+        compile_options = _build_ptoas_vmi_compile_options(metadata, opt)
+        npu_compiler_path, env = _get_npucompiler_path()
+        cmd_list = [npu_compiler_path, src_path] + compile_options + ["-o", dst_path]
+
+        if opt.debug or os.getenv("TRITON_PRINT_AUTOTUNING", None) == "1":
+            print_cmd_list = cmd_list.copy()
+            print_cmd_list[1], print_cmd_list[-1] = _get_dump_paths(metadata["hash"], src_path, dst_path)
+            print(f"[DEBUG] cmd_list: {shlex.join(print_cmd_list)}")
+
+        try:
+            subprocess.run(cmd_list, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+        except subprocess.CalledProcessError as e:
+            if opt.debug:
+                _save_npuir_debug_output(e.stdout, e.stderr, tmpdir, metadata["hash"])
+            raise
+
+        if not Path(dst_path).exists():
+            raise FileNotFoundError(f"Expected PTOAS VMI output was not generated: {dst_path}")
+
+        return Path(dst_path).read_text()
+
+
+def ptoas_vmi_to_npubin(ptoas_vmi: str, metadata, opt):
+    _set_ptoas_launcher_defaults(metadata)
+    ptoas_arch = _get_ptoas_arch_for_target(opt.target_arch)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        src_path = os.path.join(tmpdir, "kernel.ptovmi.mlir")
+        fatobj_path = os.path.join(tmpdir, "kernel.ptoas-fatobj.o")
+        extracted_obj_path = os.path.join(tmpdir, "kernel.aicore-rel.o")
+        fatobj_copy_path = os.path.join(tmpdir, "kernel.ptoas-fatobj.copy.o")
+        npubin_path = os.path.join(tmpdir, "kernel.npubin")
+        Path(src_path).write_text(ptoas_vmi)
+
+        ptoas_path, ptoas_env = _get_ptoas_path()
+        ptoas_cmd = [ptoas_path, "--pto-backend=vpto", f"--pto-arch={ptoas_arch}", src_path, "-o", fatobj_path]
+        if opt.debug or os.getenv("TRITON_PRINT_AUTOTUNING", None) == "1":
+            print_cmd = ptoas_cmd.copy()
+            print_cmd[3], print_cmd[-1] = _get_dump_paths(metadata["hash"], src_path, fatobj_path)
+            print(f"[DEBUG] ptoas cmd_list: {shlex.join(print_cmd)}")
+        subprocess.run(ptoas_cmd, env=ptoas_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+        if not Path(fatobj_path).exists():
+            raise FileNotFoundError(f"Expected PTOAS fat object was not generated: {fatobj_path}")
+
+        objcopy_path, objcopy_env = _get_objcopy_path()
+        objcopy_cmd = [
+            objcopy_path,
+            f"--dump-section",
+            f"__aicore_rel_binary={extracted_obj_path}",
+            fatobj_path,
+            fatobj_copy_path,
+        ]
+        subprocess.run(objcopy_cmd, env=objcopy_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+        if not Path(extracted_obj_path).exists():
+            raise FileNotFoundError(f"Expected extracted AICore relocatable object was not generated: {extracted_obj_path}")
+
+        linker_path, linker_env = _get_aicore_linker_path()
+        linker_cmd = [
+            linker_path,
+            "-m",
+            "aicorelinux",
+            "-Ttext",
+            "0",
+            extracted_obj_path,
+            "--allow-multiple-definition",
+            "-o",
+            npubin_path,
+        ]
+        subprocess.run(linker_cmd, env=linker_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+        if not Path(npubin_path).exists():
+            raise FileNotFoundError(f"Expected npubin was not generated: {npubin_path}")
+
+        if opt.debug:
+            dump_manager = get_dump_manager(metadata["hash"])
+            dump_manager.put(Path(fatobj_path).read_bytes(), "kernel.ptoas-fatobj.o", binary=True)
+            dump_manager.put(Path(extracted_obj_path).read_bytes(), "kernel.aicore-rel.o", binary=True)
+
+        return Path(npubin_path).read_bytes()
 
 
 def get_common_bishengir_compile_options(metadata):
@@ -1016,6 +1184,7 @@ _CANONICAL_COMPILE_MODES = ("simd", "simd_simt_template", "simt_only")
 _COMPILE_MODE_ALIASES = {
     "unstructured_in_simt": "simd_simt_template",
 }
+_CANONICAL_COMPILE_FLOWS = ("npuir", "ptoas")
 
 
 def _normalize_compile_mode(compile_mode, arch: str) -> str:
@@ -1037,6 +1206,19 @@ def _normalize_compile_mode(compile_mode, arch: str) -> str:
     if canonical_mode == "simt_only" and not _is_a5_target_arch(arch):
         raise ValueError('compile_mode="simt_only" is supported only on A5 targets.')
     return canonical_mode
+
+
+def _normalize_compile_flow(compile_flow) -> str:
+    if compile_flow is None:
+        compile_flow = os.getenv("TRITON_ASCEND_COMPILE_FLOW", "npuir")
+    if not isinstance(compile_flow, str):
+        raise ValueError("compile_flow must be a string; expected one of: " + ", ".join(_CANONICAL_COMPILE_FLOWS))
+
+    canonical_flow = compile_flow.lower()
+    if canonical_flow not in _CANONICAL_COMPILE_FLOWS:
+        raise ValueError(f"invalid compile_flow={compile_flow!r}; expected one of: " +
+                         ", ".join(_CANONICAL_COMPILE_FLOWS))
+    return canonical_flow
 
 
 @dataclass(frozen=True)
@@ -1123,6 +1305,9 @@ class NPUOptions:
     # Canonical modes: SIMD (D), SIMD with template-SIMT (P), and pure-SIMT
     # (T). ``unstructured_in_simt`` is an equivalent P spelling.
     compile_mode: str = "simd_simt_template"
+    # Canonical flows: the native NPU-IR backend (default) or the experimental
+    # NPU-IR-to-PTOAS bridge.
+    compile_flow: Optional[str] = None
     simt_stack_limit: int = None
     # take effect on the reorder instruction pattern for SIMT. The pattern is disabled by default.
     enable_simt_reorder_instruction: bool = False
@@ -1160,6 +1345,7 @@ class NPUOptions:
 
         compile_mode = str(_normalize_compile_mode(self.compile_mode, arch))
         object.__setattr__(self, "compile_mode", compile_mode)
+        object.__setattr__(self, "compile_flow", _normalize_compile_flow(self.compile_flow))
 
         if compile_mode == "simt_only":
             object.__setattr__(self, "is_pure_simt", True)
@@ -1334,7 +1520,7 @@ class AscendBackend(BaseBackend):
         if target.backend == "npu":
             self.binary_ext = "npubin"
             # Include all binary file extensions (mlirbc is always emitted for normal kernels).
-            self.binary_extensions = {"npubin", "mlirbc"}
+            self.binary_extensions = {"npubin", "mlirbc", "ptovmi"}
 
     def parse_options(self, opts) -> Any:
         # TODO: get available targets when building options?
@@ -1404,6 +1590,16 @@ class AscendBackend(BaseBackend):
     def add_stages(self, stages, options, language):
         if self.target.backend == "npu":
             stages["ttir"] = lambda src, metadata: make_ttir(src, metadata, options)
+            if options.compile_flow == "ptoas":
+                if options.is_pure_simt:
+                    raise NotImplementedError('compile_flow="ptoas" does not support compile_mode="simt_only" yet.')
+                stages["ttadapter"] = lambda src, metadata: ttir_to_linalg(src, metadata, options, named_ops=True)
+                stages["mlirbc"] = lambda src, metadata: linalg_to_bc_by_triton_mlir_opt(src, metadata, options)
+                stages["bcmlir"] = lambda src, metadata: bc_to_linalg_by_bishengir_opt(src, metadata, options)
+                stages["ptovmi"] = lambda src, metadata: linalg_to_ptoas_vmi(src, metadata, options)
+                stages["npubin"] = lambda src, metadata: ptoas_vmi_to_npubin(src, metadata, options)
+                stages["npubin"] = _with_debug_line(stages["npubin"], options)
+                return
             if options.is_pure_simt:
                 stages["npubin"] = (lambda src, metadata: ttir_to_npubin(src, metadata, options))
                 return

@@ -42,7 +42,11 @@ python run_kernel.py
 | **编译控制** | TRITON_KERNEL_OVERRIDE | 0 或未设置 | 启用或禁用 Triton 内核覆盖功能，允许在每个编译阶段开始时用用户指定的外部文件（IR/PTX等）覆盖默认生成的内核代码。 | 0：不启用<br>1：启用 | |
 | **编译控制** | TRITON_OVERRIDE_DIR | ~/.triton/override | 指定 Triton 内核覆盖文件的查找目录。当`TRITON_KERNEL_OVERRIDE=1`时加载IR/PTX文件的目录。 | "path"：保存路径 | |
 | **编译控制** | TRITON_ASCEND_COMPILE_SPEED_OPT | 0 或未设置 | 控制JIT编译器在发现内核编译失败后是否跳过后续编译阶段。设为`1`跳过（默认`0`继续尝试）。 | 0：继续尝试<br>1：跳过 | |
+| **编译控制** | TRITON_ASCEND_COMPILE_FLOW | npuir | 选择 Triton-Ascend kernel 编译流水。 | npuir：使用原生 NPU-IR 流水<br>ptoas：使用实验性的 NPU-IR-to-PTOAS 流水（`ttir→ttadapter→mlirbc→bcmlir→ptovmi→npubin`），目前仅支持 A5 Vector kernel。 | |
 | **编译控制** | TRITON_COMPILE_ONLY | 0 或未设置 | remote_launch时使用，只编译不运行。 | 0：不启用<br>1：启用 | |
+| **编译控制** | TRITON_PTOAS_PATH | 未设置 | 指定 `TRITON_ASCEND_COMPILE_FLOW=ptoas` 使用的 PTOAS 编译器。 | `ptoas` 可执行文件完整路径；未设置时从 `PATH` 查找。 | |
+| **编译控制** | TRITON_OBJCOPY_PATH | 未设置 | 指定从 PTOAS fat object 中提取 `__aicore_rel_binary` 使用的 `objcopy`。 | `objcopy` 可执行文件完整路径；未设置时从 `PATH` 查找。 | |
+| **编译控制** | TRITON_AICORE_LD_PATH | 未设置 | 可选覆盖项，用于指定将 PTOAS 提取出的 AICore relocatable object 链接为 `npubin` 的 AICore `ld.lld`。 | 通常不需要设置。编译器会从 `$ASCEND_HOME_PATH/tools/bisheng_compiler/bin/ld.lld` 推导；如果该路径不存在，再从 `PATH` 查找 `ld.lld`。 | |
 | **编译控制** | TRITON_DISABLE_FFTS | 0 或未设置 | 是否禁用FFTS。**注意**：逻辑为取反，0 表示启用 FFTS，1 表示禁用。 | 0：启用<br>1：禁用 | |
 | **编译控制** | TRITON_DISABLE_PRECOMPILE | 0 或未设置 | 是否禁用预编译。                                                                                                                                                                                                                                                                                  | 0：启用预编译<br>1：禁用预编译                                                                               | |
 | **运行与调度** | TRITON_ALL_BLOCKS_PARALLEL | 0 或未设置 | 启用或禁用自动根据物理核数优化逻辑核数，仅当逻辑核间可并行时方可启动。当逻辑核数大于物理核数时，启动该优化，则编译器自动调整逻辑核数量为物理核数，减少调度开销；启用后允许grid>65535。限制：triton kernel的逻辑必须对执行顺序不敏感才能开启该选项，否则可能会导致死锁。per-kernel 选项 `enable_auto_blockify`（详见 `architecture_difference.md`）在显式设置时优先于该环境变量；环境变量仅对未设置 `enable_auto_blockify` 的 kernel 起默认值作用。 | 0：不启用<br>1：启用 | |
@@ -116,3 +120,4 @@ if __name__ == "__main__":
 | **CV 融合/layout** | `enable_nd2nz_on_vector` | 默认 `False` | 启用或禁用 Vector 路径上的 ND 到 NZ 布局转换。 | `triton.Config` 或 launch meta-parameter |
 | **大 grid 优化** | `auto_blockify_size` | 默认 `1` | 启用或禁用 AutoBlockify pass。未设置 `TRITON_ALL_BLOCKS_PARALLEL` 时忽略。 | launch meta-parameter 或 `triton.Config` |
 | **编译模式** | `compile_mode` | `"unstructured_in_simt"`（默认）、`"simd"`、`"simt_only"` | 控制 Ascend 950 上 SIMD / SIMT 编译路径。`"simd"`：纯 SIMD；`"unstructured_in_simt"`：混合（结构化 SIMD，离散/非结构化尽量走 SIMT 间接访存模板）；`"simt_only"`：纯 SIMT （`ttir→npubin`）。| `triton.Config` 或 launch meta-parameter |
+| **编译流水** | `compile_flow` | `"npuir"`（默认）、`"ptoas"` | 选择单个 kernel 的后端流水。显式 launch/config 选项优先于 `TRITON_ASCEND_COMPILE_FLOW`。`"ptoas"` 目前是实验功能，仅支持不需要 sync-block-lock 资源元数据的 A5 Vector kernel。 | `triton.Config` 或 launch meta-parameter |
