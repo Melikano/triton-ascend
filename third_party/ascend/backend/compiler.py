@@ -1494,7 +1494,7 @@ class AscendBackend(BaseBackend):
         if target.backend == "npu":
             self.binary_ext = "npubin"
             # Include all binary file extensions (mlirbc is always emitted for normal kernels).
-            self.binary_extensions = {"npubin", "mlirbc", "ptovmi"}
+            self.binary_extensions = {"npubin", "mlirbc"}
 
     def parse_options(self, opts) -> Any:
         # TODO: get available targets when building options?

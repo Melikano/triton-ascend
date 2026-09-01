@@ -501,53 +501,18 @@ def _get_npucompiler_path() -> str:
     return npu_compiler_path, env
 
 
-def _get_tool_from_env_or_path(env_var: str, executable: str, description: str):
-    env = os.environ.copy()
-    explicit_path = os.getenv(env_var, None)
-    if explicit_path:
-        if not os.path.isfile(explicit_path) or not os.access(explicit_path, os.X_OK):
-            raise EnvironmentError(f"{env_var} points to a non-executable file: {explicit_path}")
-        return explicit_path, env
-
-    tool_path = shutil.which(executable)
-    if tool_path is None:
-        raise EnvironmentError(f"Couldn't find executable {executable}. Set {env_var} to the {description}.")
-    return tool_path, env
-
-
 def _get_ptoas_path():
-    return _get_tool_from_env_or_path("TRITON_PTOAS_PATH", "ptoas", "PTOAS compiler path")
-
-
-def _get_objcopy_path():
-    return _get_tool_from_env_or_path("TRITON_OBJCOPY_PATH", "objcopy", "objcopy path")
-
-
-def _get_aicore_linker_path():
     env = os.environ.copy()
-    explicit_path = os.getenv("TRITON_AICORE_LD_PATH", None)
+    explicit_path = os.getenv("TRITON_PTOAS_PATH", None)
     if explicit_path:
         if not os.path.isfile(explicit_path) or not os.access(explicit_path, os.X_OK):
-            raise EnvironmentError(f"TRITON_AICORE_LD_PATH points to a non-executable file: {explicit_path}")
+            raise EnvironmentError(f"TRITON_PTOAS_PATH points to a non-executable file: {explicit_path}")
         return explicit_path, env
 
-    ascend_home = os.getenv("ASCEND_HOME_PATH", "")
-    if ascend_home:
-        ascend_home_path = Path(ascend_home)
-        candidates = [
-            ascend_home_path / "tools" / "bisheng_compiler" / "bin" / "ld.lld",
-            ascend_home_path.parent / "tools" / "bisheng_compiler" / "bin" / "ld.lld",
-        ]
-        for linker_path in candidates:
-            if linker_path.is_file() and os.access(linker_path, os.X_OK):
-                return str(linker_path), env
-
-    linker_path = shutil.which("ld.lld")
-    if linker_path is None:
-        raise EnvironmentError(
-            "Couldn't find executable ld.lld. Source CANN set_env.sh so ASCEND_HOME_PATH is set, "
-            "or set TRITON_AICORE_LD_PATH to override the CANN AICore linker path.")
-    return linker_path, env
+    ptoas_path = shutil.which("ptoas")
+    if ptoas_path is None:
+        raise EnvironmentError("Couldn't find executable ptoas. Set TRITON_PTOAS_PATH to the PTOAS compiler path.")
+    return ptoas_path, env
 
 
 def _get_bisheng_path() -> str:
@@ -624,15 +589,7 @@ def _get_ascend_path() -> Path:
     path = os.getenv("ASCEND_HOME_PATH", "")
     if path == "":
         raise EnvironmentError("ASCEND_HOME_PATH is not set, source <ascend-toolkit>/set_env.sh first")
-    ascend_path = Path(path)
-    if (ascend_path / "include").exists() and (ascend_path / "lib64").exists():
-        return ascend_path
-
-    arch_path = ascend_path / f"{get_machine_arch()}-linux"
-    if (arch_path / "include").exists() and (arch_path / "lib64").exists():
-        return arch_path
-
-    return ascend_path
+    return Path(path)
 
 
 def _is_ascend_sanitizer_enabled() -> bool:
@@ -882,8 +839,6 @@ def _find_cann_version_file():
     ascend_path = str(_get_ascend_path())
     arch = get_machine_arch()
     candidates = [
-        os.path.join(ascend_path, "ascend_toolkit_install.info"),
-        os.path.join(ascend_path, "ascend_all_cann_install.info"),
         os.path.join(ascend_path, arch + "-linux", "ascend_toolkit_install.info"),
         os.path.join(ascend_path, arch + "-linux", "ascend_all_cann_install.info"),
     ]
