@@ -49,9 +49,7 @@ from triton.backends.ascend.utils import (
     _enable_dump_memory_info,
     _enable_msdebug,
     _get_kernel_target,
-    _get_aicore_linker_path,
     _get_npucompiler_path,
-    _get_objcopy_path,
     _get_ptoas_path,
     _get_triton_adapter_opt_path,
     _get_triton_mlir_opt_path,
@@ -615,54 +613,30 @@ def ptoas_vmi_to_npubin(ptoas_vmi: str, metadata, opt):
 
     with tempfile.TemporaryDirectory() as tmpdir:
         src_path = os.path.join(tmpdir, "kernel.ptovmi.mlir")
-        fatobj_path = os.path.join(tmpdir, "kernel.ptoas-fatobj.o")
-        extracted_obj_path = os.path.join(tmpdir, "kernel.aicore-rel.o")
-        fatobj_copy_path = os.path.join(tmpdir, "kernel.ptoas-fatobj.copy.o")
         npubin_path = os.path.join(tmpdir, "kernel.npubin")
         Path(src_path).write_text(ptoas_vmi)
 
         ptoas_path, ptoas_env = _get_ptoas_path()
-        ptoas_cmd = [ptoas_path, "--pto-backend=vpto", f"--pto-arch={ptoas_arch}", src_path, "-o", fatobj_path]
-        if opt.debug or os.getenv("TRITON_PRINT_AUTOTUNING", None) == "1":
-            print_cmd = ptoas_cmd.copy()
-            print_cmd[3], print_cmd[-1] = _get_dump_paths(metadata["hash"], src_path, fatobj_path)
-            print(f"[DEBUG] ptoas cmd_list: {shlex.join(print_cmd)}")
-        subprocess.run(ptoas_cmd, env=ptoas_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
-        if not Path(fatobj_path).exists():
-            raise FileNotFoundError(f"Expected PTOAS fat object was not generated: {fatobj_path}")
-
-        objcopy_path, objcopy_env = _get_objcopy_path()
-        objcopy_cmd = [
-            objcopy_path,
-            f"--dump-section",
-            f"__aicore_rel_binary={extracted_obj_path}",
-            fatobj_path,
-            fatobj_copy_path,
-        ]
-        subprocess.run(objcopy_cmd, env=objcopy_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
-        if not Path(extracted_obj_path).exists():
-            raise FileNotFoundError(f"Expected extracted AICore relocatable object was not generated: {extracted_obj_path}")
-
-        linker_path, linker_env = _get_aicore_linker_path()
-        linker_cmd = [
-            linker_path,
-            "-m",
-            "aicorelinux",
-            "-Ttext",
-            "0",
-            extracted_obj_path,
-            "--allow-multiple-definition",
+        ptoas_cmd = [
+            ptoas_path,
+            "--pto-backend=vpto",
+            f"--pto-arch={ptoas_arch}",
+            "--emit-device-object",
+            src_path,
             "-o",
             npubin_path,
         ]
-        subprocess.run(linker_cmd, env=linker_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+        if opt.debug or os.getenv("TRITON_PRINT_AUTOTUNING", None) == "1":
+            print_cmd = ptoas_cmd.copy()
+            print_cmd[4], print_cmd[-1] = _get_dump_paths(metadata["hash"], src_path, npubin_path)
+            print(f"[DEBUG] ptoas cmd_list: {shlex.join(print_cmd)}")
+        subprocess.run(ptoas_cmd, env=ptoas_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
         if not Path(npubin_path).exists():
-            raise FileNotFoundError(f"Expected npubin was not generated: {npubin_path}")
+            raise FileNotFoundError(f"Expected PTOAS device object was not generated: {npubin_path}")
 
         if opt.debug:
             dump_manager = get_dump_manager(metadata["hash"])
-            dump_manager.put(Path(fatobj_path).read_bytes(), "kernel.ptoas-fatobj.o", binary=True)
-            dump_manager.put(Path(extracted_obj_path).read_bytes(), "kernel.aicore-rel.o", binary=True)
+            dump_manager.put(Path(npubin_path).read_bytes(), "kernel.ptoas-device.o", binary=True)
 
         return Path(npubin_path).read_bytes()
 
