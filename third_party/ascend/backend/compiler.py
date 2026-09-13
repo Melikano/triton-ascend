@@ -515,6 +515,11 @@ def _set_ptoas_launcher_defaults(metadata: dict):
     metadata.setdefault("lock_init_val", 0)
     metadata.setdefault("bs_task_type", 0)
     metadata.setdefault("required_ub_bits", 0)
+    metadata.setdefault(
+        "auto_blockify_enabled",
+        _is_auto_map_parallel_blocks_enabled()
+        and not metadata.get("has_auto_blockify_blacklist_op", False),
+    )
 
 
 def _validate_ptoas_launcher_contract(linalg: str, metadata: dict, opt):
@@ -556,7 +561,7 @@ def _build_ptoas_vmi_compile_options(metadata: dict, opt):
         auto_multi_buffer = "no-limit"
     compile_options += [f"--limit-auto-multi-buffer-of-local-buffer={auto_multi_buffer}"]
 
-    if _is_auto_map_parallel_blocks_enabled() and not metadata.get("has_auto_blockify_blacklist_op", False):
+    if metadata["auto_blockify_enabled"]:
         compile_options += ["--enable-auto-blockify-loop"]
 
     compile_options += [

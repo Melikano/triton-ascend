@@ -65,7 +65,8 @@ def test_linalg_to_ptoas_vmi_invokes_bishengir_emit(monkeypatch):
     metadata = _make_metadata(options)
     commands = []
 
-    monkeypatch.setattr(compiler, "_get_npucompiler_path", lambda: ("/fake/bishengir-compile", os.environ.copy()))
+    monkeypatch.setattr(compiler, "_get_npucompiler_path",
+                        lambda: ("/fake/bishengir-compile", os.environ.copy()))
 
     def fake_run(cmd, env=None, stdout=None, stderr=None, check=False, **kwargs):
         commands.append(cmd)
@@ -87,11 +88,35 @@ def test_linalg_to_ptoas_vmi_invokes_bishengir_emit(monkeypatch):
     assert metadata["workspace_size"] == 0
     assert metadata["lock_num"] == 0
     assert metadata["lock_init_value"] == 0
+    assert metadata["auto_blockify_enabled"] is True
     assert commands[0][0] == "/fake/bishengir-compile"
     assert "--emit-ptoas-vmi" in commands[0]
     assert "--target=Ascend950PR_9599" in commands[0]
+    assert "--enable-auto-blockify-loop" in commands[0]
     assert "--enable-hivm-compile=true" in commands[0]
     assert "--enable-triton-kernel-compile=true" in commands[0]
+
+
+def test_ptoas_compile_flow_exports_disabled_auto_blockify(monkeypatch):
+    options = compiler.NPUOptions(arch="Ascend950PR_9599", compile_flow="ptoas")
+    metadata = _make_metadata(options)
+    metadata["has_auto_blockify_blacklist_op"] = True
+    commands = []
+
+    monkeypatch.setattr(compiler, "_get_npucompiler_path", lambda: ("/fake/bishengir-compile", os.environ.copy()))
+
+    def fake_run(cmd, **kwargs):
+        commands.append(cmd)
+        with open(cmd[-1], "w") as f:
+            f.write("module { pto.vmi.return }\n")
+        return subprocess.CompletedProcess(cmd, 0, b"", b"")
+
+    monkeypatch.setattr(compiler.subprocess, "run", fake_run)
+
+    compiler.linalg_to_ptoas_vmi(_sample_linalg(), metadata, options)
+
+    assert metadata["auto_blockify_enabled"] is False
+    assert "--enable-auto-blockify-loop" not in commands[0]
 
 
 def test_ptoas_vmi_to_npubin_uses_direct_device_object(monkeypatch):
