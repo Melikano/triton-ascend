@@ -515,6 +515,7 @@ def _set_ptoas_launcher_defaults(metadata: dict):
     metadata.setdefault("lock_init_val", 0)
     metadata.setdefault("bs_task_type", 0)
     metadata.setdefault("required_ub_bits", 0)
+    metadata.setdefault("ptsm_cap_authorized", False)
     metadata.setdefault(
         "auto_blockify_enabled",
         _is_auto_map_parallel_blocks_enabled()

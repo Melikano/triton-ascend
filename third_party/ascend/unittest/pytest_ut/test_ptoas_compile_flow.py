@@ -88,6 +88,7 @@ def test_linalg_to_ptoas_vmi_invokes_bishengir_emit(monkeypatch):
     assert metadata["workspace_size"] == 0
     assert metadata["lock_num"] == 0
     assert metadata["lock_init_value"] == 0
+    assert metadata["ptsm_cap_authorized"] is False
     assert metadata["auto_blockify_enabled"] is True
     assert commands[0][0] == "/fake/bishengir-compile"
     assert "--emit-ptoas-vmi" in commands[0]
