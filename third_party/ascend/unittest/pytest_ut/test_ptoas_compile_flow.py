@@ -60,6 +60,14 @@ def test_ptoas_compile_flow_rejects_pure_simt():
         backend.add_stages({}, options, language="ttir")
 
 
+def test_ptoas_compile_flow_accepts_mixed_aic_aiv_kernel():
+    options = compiler.NPUOptions(arch="Ascend950PR_9599", compile_flow="ptoas")
+    metadata = {"mix_mode": "mix"}
+    linalg = _sample_linalg().replace('mix_mode = "aiv"', 'mix_mode = "mix"')
+
+    compiler._validate_ptoas_launcher_contract(linalg, metadata, options)
+
+
 def test_linalg_to_ptoas_vmi_invokes_bishengir_emit(monkeypatch):
     options = compiler.NPUOptions(arch="Ascend950PR_9599", compile_flow="ptoas")
     metadata = _make_metadata(options)

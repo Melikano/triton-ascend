@@ -529,8 +529,10 @@ def _validate_ptoas_launcher_contract(linalg: str, metadata: dict, opt):
     _get_ptoas_arch_for_target(opt.target_arch)
 
     mix_mode = metadata.get("mix_mode", "")
-    if not isinstance(mix_mode, str) or not mix_mode.lower().strip("_").startswith("aiv"):
-        raise NotImplementedError(f'compile_flow="ptoas" currently supports only AIV/vector kernels; got {mix_mode!r}.')
+    normalized_mix_mode = mix_mode.lower().strip("_") if isinstance(mix_mode, str) else ""
+    if not (normalized_mix_mode.startswith("aiv") or normalized_mix_mode == "mix"):
+        raise NotImplementedError(
+            f'compile_flow="ptoas" currently supports only AIV/vector or mixed AIC/AIV kernels; got {mix_mode!r}.')
 
     if metadata.get("has_unordered_sync_block_lock", False) or re.search(r'\bsync_block_lock\b', linalg):
         raise NotImplementedError(
