@@ -612,7 +612,12 @@ def linalg_to_ptoas_vmi(linalg: str, metadata, opt):
         if not Path(dst_path).exists():
             raise FileNotFoundError(f"Expected PTOAS VMI output was not generated: {dst_path}")
 
-        return Path(dst_path).read_text()
+        ptoas_vmi = Path(dst_path).read_text()
+        if opt.debug:
+            dump_manager = get_dump_manager(metadata["hash"])
+            dump_manager.put(ptoas_vmi, "kernel.ptovmi.mlir", binary=False)
+
+        return ptoas_vmi
 
 
 def ptoas_vmi_to_npubin(ptoas_vmi: str, metadata, opt):

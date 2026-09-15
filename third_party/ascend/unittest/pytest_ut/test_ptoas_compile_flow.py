@@ -106,6 +106,32 @@ def test_linalg_to_ptoas_vmi_invokes_bishengir_emit(monkeypatch):
     assert "--enable-triton-kernel-compile=true" in commands[0]
 
 
+def test_linalg_to_ptoas_vmi_persists_debug_dump(monkeypatch):
+    options = compiler.NPUOptions(arch="Ascend950PR_9599", compile_flow="ptoas", debug=True)
+    metadata = _make_metadata(options)
+    dumped = []
+
+    monkeypatch.setattr(compiler, "_get_npucompiler_path",
+                        lambda: ("/fake/bishengir-compile", os.environ.copy()))
+
+    def fake_run(cmd, **kwargs):
+        with open(cmd[-1], "w") as f:
+            f.write("module { pto.vmi.return }\n")
+        return subprocess.CompletedProcess(cmd, 0, b"", b"")
+
+    class FakeDumpManager:
+
+        def put(self, data, filename, binary):
+            dumped.append((data, filename, binary))
+
+    monkeypatch.setattr(compiler.subprocess, "run", fake_run)
+    monkeypatch.setattr(compiler, "get_dump_manager", lambda key: FakeDumpManager())
+
+    compiler.linalg_to_ptoas_vmi(_sample_linalg(), metadata, options)
+
+    assert dumped == [("module { pto.vmi.return }\n", "kernel.ptovmi.mlir", False)]
+
+
 def test_ptoas_compile_flow_exports_disabled_auto_blockify(monkeypatch):
     options = compiler.NPUOptions(arch="Ascend950PR_9599", compile_flow="ptoas")
     metadata = _make_metadata(options)
