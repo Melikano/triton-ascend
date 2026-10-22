@@ -539,87 +539,6 @@ def _validate_ptoas_launcher_contract(linalg: str, metadata: dict, opt):
             'compile_flow="ptoas" cannot launch sync-block-lock kernels until PTOAS exposes resource metadata.')
 
 
-def _build_ptoas_vmi_compile_options(metadata: dict, opt):
-    compile_options = get_common_bishengir_compile_options(metadata)
-    compile_options += ["--emit-ptoas-vmi"]
-
-    multibuffer = metadata.get("multibuffer")
-    num_stages = metadata.get("num_stages")
-    if multibuffer is not None or num_stages is not None:
-        multi_buffer_value = True
-        if multibuffer is not None and not multibuffer:
-            multi_buffer_value = False
-        elif num_stages is not None and num_stages == 1:
-            multi_buffer_value = False
-        compile_options += [f"--enable-auto-multi-buffer={multi_buffer_value}"]
-
-    compile_options += [
-        f"--enable-auto-bind-sub-block={get_auto_bind_sub_block_option(metadata)}",
-    ]
-    if force_disable_ffts(opt.target_arch):
-        compile_options += ["--disable-ffts"]
-
-    auto_multi_buffer = metadata.get("limit_auto_multi_buffer_of_local_buffer")
-    if auto_multi_buffer is None:
-        auto_multi_buffer = "no-limit"
-    compile_options += [f"--limit-auto-multi-buffer-of-local-buffer={auto_multi_buffer}"]
-
-    if metadata["auto_blockify_enabled"]:
-        compile_options += ["--enable-auto-blockify-loop"]
-
-    compile_options += [
-        "--enable-hfusion-compile=true",
-        "--enable-hivm-compile=true",
-        "--enable-triton-kernel-compile=true",
-        "--mlir-disable-threading",
-        "--mlir-print-ir-after-failure",
-        "--mlir-print-stacktrace-on-diagnostic",
-    ]
-
-    vf_merge_level = metadata.get("vf_merge_level")
-    if vf_merge_level is not None:
-        compile_options += [f"--enable-vf-merge-level={vf_merge_level}"]
-
-    return compile_options
-
-
-def linalg_to_ptoas_vmi(linalg: str, metadata, opt):
-    linalg, metadata = _parse_linalg_metadata(linalg, metadata)
-    _validate_ptoas_launcher_contract(linalg, metadata, opt)
-    _set_ptoas_launcher_defaults(metadata)
-
-    with tempfile.TemporaryDirectory() as tmpdir:
-        src_path = os.path.join(tmpdir, "kernel.mlir")
-        dst_path = os.path.join(tmpdir, "kernel.ptovmi.mlir")
-        Path(src_path).write_text(linalg)
-
-        compile_options = _build_ptoas_vmi_compile_options(metadata, opt)
-        npu_compiler_path, env = _get_npucompiler_path()
-        cmd_list = [npu_compiler_path, src_path] + compile_options + ["-o", dst_path]
-
-        if opt.debug or os.getenv("TRITON_PRINT_AUTOTUNING", None) == "1":
-            print_cmd_list = cmd_list.copy()
-            print_cmd_list[1], print_cmd_list[-1] = _get_dump_paths(metadata["hash"], src_path, dst_path)
-            print(f"[DEBUG] cmd_list: {shlex.join(print_cmd_list)}")
-
-        try:
-            subprocess.run(cmd_list, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
-        except subprocess.CalledProcessError as e:
-            if opt.debug:
-                _save_npuir_debug_output(e.stdout, e.stderr, tmpdir, metadata["hash"])
-            raise
-
-        if not Path(dst_path).exists():
-            raise FileNotFoundError(f"Expected PTOAS VMI output was not generated: {dst_path}")
-
-        ptoas_vmi = Path(dst_path).read_text()
-        if opt.debug:
-            dump_manager = get_dump_manager(metadata["hash"])
-            dump_manager.put(ptoas_vmi, "kernel.ptovmi.mlir", binary=False)
-
-        return ptoas_vmi
-
-
 def ptoas_vmi_to_npubin(ptoas_vmi: str, metadata, opt):
     _set_ptoas_launcher_defaults(metadata)
     ptoas_arch = _get_ptoas_arch_for_target(opt.target_arch)
@@ -731,18 +650,25 @@ def try_compile_with_config(linalg: str, ub_config: Dict[str, Any], metadata: di
         return (False, str(e))
 
 
-def linalg_to_bin_enable_npu_compile_910_95(linalg: str, metadata, opt):
+def linalg_to_bin_enable_npu_compile_910_95(linalg: str, metadata, opt, *, emit_ptoas_vmi=False):
     linalg, metadata = _parse_linalg_metadata(linalg, metadata)
+    if emit_ptoas_vmi:
+        _validate_ptoas_launcher_contract(linalg, metadata, opt)
+        _set_ptoas_launcher_defaults(metadata)
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_file_name = "kernel.mlir"
         ttadapter_path = os.path.join(tmpdir, tmp_file_name)
         Path(ttadapter_path).write_text(linalg)
         bin_file = os.path.join(tmpdir, "kernel")
-        if _check_bishengir_api_change():
-            bin_file_with_ext = "kernel.o"
+        if emit_ptoas_vmi:
+            bin_file = os.path.join(tmpdir, "kernel.ptovmi.mlir")
+            bin_path = bin_file
         else:
-            bin_file_with_ext = "kernel_reloc.o"
-        bin_path = os.path.join(tmpdir, bin_file_with_ext)
+            if _check_bishengir_api_change():
+                bin_file_with_ext = "kernel.o"
+            else:
+                bin_file_with_ext = "kernel_reloc.o"
+            bin_path = os.path.join(tmpdir, bin_file_with_ext)
         callback_path = os.path.join(tmpdir, "libkernel.so")
         _compile_option_list = get_common_bishengir_compile_options(metadata)
 
@@ -915,6 +841,11 @@ def linalg_to_bin_enable_npu_compile_910_95(linalg: str, metadata, opt):
         if plan_memory_strategy is not None:
             _compile_option_list += [f"--plan-memory-strategy={plan_memory_strategy}"]
 
+        if emit_ptoas_vmi:
+            # Share all native A5 controls; only the output boundary differs.
+            # Retain the existing bridge's explicit HIVM/threading switches.
+            _compile_option_list += ["--emit-ptoas-vmi", "--enable-hivm-compile=true", "--mlir-disable-threading"]
+
         cmd_list = ([npu_compiler_path, ttadapter_path] + _compile_option_list + ["-o", bin_file])
 
         if opt.debug or os.getenv("TRITON_PRINT_AUTOTUNING", None) == "1":
@@ -937,6 +868,14 @@ def linalg_to_bin_enable_npu_compile_910_95(linalg: str, metadata, opt):
         if match:
             # get the ub bits of triton kernel from bisheng for inductor autotune using
             metadata["required_ub_bits"] = int(match.group(1))
+
+        if emit_ptoas_vmi:
+            if not Path(bin_path).exists():
+                raise FileNotFoundError(f"Expected PTOAS VMI output was not generated: {bin_path}")
+            ptoas_vmi = Path(bin_path).read_text()
+            if opt.debug:
+                get_dump_manager(metadata["hash"]).put(ptoas_vmi, "kernel.ptovmi.mlir", binary=False)
+            return ptoas_vmi
 
         if not Path(bin_path).exists():
             error_msg = ret.stderr.decode('utf-8') if ret.stderr else ''
@@ -1577,16 +1516,8 @@ class AscendBackend(BaseBackend):
     def add_stages(self, stages, options, language):
         if self.target.backend == "npu":
             stages["ttir"] = lambda src, metadata: make_ttir(src, metadata, options)
-            if options.compile_flow == "ptoas":
-                if options.is_pure_simt:
-                    raise NotImplementedError('compile_flow="ptoas" does not support compile_mode="simt_only" yet.')
-                stages["ttadapter"] = lambda src, metadata: ttir_to_linalg(src, metadata, options, named_ops=True)
-                stages["mlirbc"] = lambda src, metadata: linalg_to_bc_by_triton_mlir_opt(src, metadata, options)
-                stages["bcmlir"] = lambda src, metadata: bc_to_linalg_by_bishengir_opt(src, metadata, options)
-                stages["ptovmi"] = lambda src, metadata: linalg_to_ptoas_vmi(src, metadata, options)
-                stages["npubin"] = lambda src, metadata: ptoas_vmi_to_npubin(src, metadata, options)
-                stages["npubin"] = _with_debug_line(stages["npubin"], options)
-                return
+            if options.compile_flow == "ptoas" and options.is_pure_simt:
+                raise NotImplementedError('compile_flow="ptoas" does not support compile_mode="simt_only" yet.')
             if options.is_pure_simt:
                 stages["npubin"] = (lambda src, metadata: ttir_to_npubin(src, metadata, options))
                 return
@@ -1594,7 +1525,11 @@ class AscendBackend(BaseBackend):
             # Normal kernels always convert Linalg IR to bytecode and back to MLIR text.
             stages["mlirbc"] = lambda src, metadata: linalg_to_bc_by_triton_mlir_opt(src, metadata, options)
             stages["bcmlir"] = lambda src, metadata: bc_to_linalg_by_bishengir_opt(src, metadata, options)
-            if options.compile_on_910_95:
+            if options.compile_flow == "ptoas":
+                stages["ptovmi"] = lambda src, metadata: linalg_to_bin_enable_npu_compile_910_95(
+                    src, metadata, options, emit_ptoas_vmi=True)
+                stages["npubin"] = lambda src, metadata: ptoas_vmi_to_npubin(src, metadata, options)
+            elif options.compile_on_910_95:
                 stages["npubin"] = (
                     lambda src, metadata: linalg_to_bin_enable_npu_compile_910_95(src, metadata, options))
             else:
