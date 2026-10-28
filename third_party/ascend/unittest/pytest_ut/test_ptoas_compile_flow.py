@@ -20,6 +20,7 @@ def mock_native_compiler_dependencies(monkeypatch):
     monkeypatch.setattr(compiler, "_enable_msdebug", lambda: False)
     monkeypatch.setattr(compiler, "_enable_print_ub_bits", lambda: False)
     monkeypatch.setattr(compiler, "_is_auto_map_parallel_blocks_enabled", lambda: True)
+    monkeypatch.setattr(compiler, "_require_ptoas_host_export", lambda *args: None)
 
 
 def _make_metadata(options):

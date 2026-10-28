@@ -34,6 +34,8 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, Dict, Optional, Tuple, Union
 from .debug_line_rewriter import rewrite_debug_line
+from .ptoas_host import (METADATA_CALLBACKS, compile_host_callbacks as _compile_ptoas_host_callbacks,
+                         require_host_export as _require_ptoas_host_export)
 
 from triton._C.libtriton import ir, passes, ascend, buffer_ir
 from triton._C.libtriton.ascend import ir as ascend_ir
@@ -387,13 +389,26 @@ def bc_to_linalg_by_bishengir_opt(bc_data: bytes, metadata, opt):
         return linalg_text
 
 
-def __get_metadata_attr_by_callback(lib, postfix: str, metadata, meta_key: str):
-    func_symbol = metadata["kernel_name"] + postfix
+def __get_metadata_attr_by_callback(lib, postfix: str, metadata, meta_key: str, *, symbol=None, restype=ctypes.c_int64):
+    func_symbol = symbol or metadata["kernel_name"] + postfix
     if hasattr(lib, func_symbol):
         callback_func = getattr(lib, func_symbol)
-        callback_func.restype = ctypes.c_int64
+        callback_func.restype = restype
         callback_func.argtypes = []
         metadata[meta_key] = callback_func()
+
+
+def _read_metadata_callbacks(callback_path, metadata, *, symbols=None):
+    lib = ctypes.CDLL(str(callback_path))
+    for suffix, key in METADATA_CALLBACKS:
+        if symbols is None:
+            __get_metadata_attr_by_callback(lib, suffix, metadata, key)
+        elif key in symbols:
+            symbol, return_bits = symbols[key]
+            if not hasattr(lib, symbol):
+                raise RuntimeError(f"HOST metadata callback {symbol!r} is missing from {callback_path}")
+            __get_metadata_attr_by_callback(lib, suffix, metadata, key, symbol=symbol,
+                                            restype=ctypes.c_int8 if return_bits == 8 else ctypes.c_int64)
 
 
 def _parse_linalg_metadata(linalg: str, metadata: dict):
@@ -872,6 +887,25 @@ def linalg_to_bin_enable_npu_compile_910_95(linalg: str, metadata, opt, *, emit_
         if emit_ptoas_vmi:
             if not Path(bin_path).exists():
                 raise FileNotFoundError(f"Expected PTOAS VMI output was not generated: {bin_path}")
+            _require_ptoas_host_export(npu_compiler_path, env)
+            host_path = Path(bin_path + ".host.mlir")
+            if host_path.exists():
+                try:
+                    host_library, symbols = _compile_ptoas_host_callbacks(
+                        host_path, npu_compiler_path, env, metadata["kernel_name"])
+                    _read_metadata_callbacks(host_library, metadata, symbols=symbols)
+                finally:
+                    if opt.debug:
+                        for artifact in (host_path, host_path.with_name("kernel.host.llvm.mlir"),
+                                         host_path.with_name("kernel.host.ll")):
+                            if artifact.is_file():
+                                get_dump_manager(metadata["hash"]).put(artifact.read_text(), artifact.name, binary=False)
+            elif re.search(r'hacc\.function_kind\s*=\s*#hacc\.function_kind<HOST>', linalg):
+                raise FileNotFoundError(f"Expected automatic HOST sidecar was not generated: {host_path}")
+            if metadata.get("workspace_size", 0) < 0 or metadata.get("bs_task_type", 0) < 0:
+                raise RuntimeError("PTOAS HOST metadata returned a negative workspace size or task type")
+            if metadata.get("sync_block_lock_layout", 0):
+                raise NotImplementedError('compile_flow="ptoas" does not support HOST sync-block-lock resources')
             ptoas_vmi = Path(bin_path).read_text()
             if opt.debug:
                 get_dump_manager(metadata["hash"]).put(ptoas_vmi, "kernel.ptovmi.mlir", binary=False)
@@ -884,12 +918,7 @@ def linalg_to_bin_enable_npu_compile_910_95(linalg: str, metadata, opt, *, emit_
             raise subprocess.CalledProcessError(ret.returncode, cmd_list, ret.stdout, ret.stderr)
 
         if Path(callback_path).is_file():
-            lib = ctypes.CDLL(callback_path)
-            __get_metadata_attr_by_callback(lib, "_infer_task_type_function", metadata, "bs_task_type")
-            __get_metadata_attr_by_callback(lib, "_infer_workspace_shape_function", metadata, "workspace_size")
-            __get_metadata_attr_by_callback(lib, "_infer_sync_block_lock_num_function", metadata,
-                                            "sync_block_lock_layout")
-            __get_metadata_attr_by_callback(lib, "_infer_sync_block_lock_init_function", metadata, "lock_init_val")
+            _read_metadata_callbacks(callback_path, metadata)
 
         return Path(bin_path).read_bytes()
 
